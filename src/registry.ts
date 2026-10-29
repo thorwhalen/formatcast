@@ -96,6 +96,9 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
   const weights: Weights = { ...DEFAULT_WEIGHTS, ...options.weights };
 
   let raw = new Map<string, FormatDef>(); // as registered (merged), by id
+  let order = new Map<string, number>(); // id -> the sequence number of the pack that last registered it
+  let packSeq = 0;
+  const dead = new Set<Step>(); // edges whose loaded module turned out to lack that direction
   let transforms: TransformDef[] = [];
   let effective = new Map<string, FormatDef>();
   let edges: Edge[] = [];
@@ -109,14 +112,14 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     const baseRaw = from.get(f.extends);
     if (!baseRaw) throw new FormatcastError('NO_FORMAT', `Format '${f.id}' extends unknown format '${f.extends}'`);
     const base = resolveAlias(baseRaw, from, seen);
-    const codec = _CODEC_FIELDS.some((k) => k in f) ? {} : Object.fromEntries(_CODEC_FIELDS.map((k) => [k, base[k]]));
+    const codec = _CODEC_FIELDS.some((k) => f[k] !== undefined) ? {} : Object.fromEntries(_CODEC_FIELDS.map((k) => [k, base[k]]));
     return { kind: base.kind, binary: base.binary, cost: base.cost, ...codec, ...f, params: { ...base.params, ...f.params } };
   }
 
   /** A later definition of an id refines the earlier one; a codec replaces the codec as a whole. */
   function merge(old: FormatDef | undefined, f: FormatDef): FormatDef {
     if (!old || f.replace) return f;
-    const base = _CODEC_FIELDS.some((k) => k in f) ? Object.fromEntries(Object.entries(old).filter(([k]) => !(_CODEC_FIELDS as readonly string[]).includes(k))) : old;
+    const base = _CODEC_FIELDS.some((k) => f[k] !== undefined) ? Object.fromEntries(Object.entries(old).filter(([k]) => !(_CODEC_FIELDS as readonly string[]).includes(k))) : old;
     return { ...base, ...f, params: { ...old.params, ...f.params } } as FormatDef;
   }
 
@@ -156,6 +159,27 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     return fn;
   }
 
+  /** A lazy module lacks a direction its format did not rule out: retire that edge, so the next routing avoids it. */
+  function deadEnd(edge: Edge, message: string): FormatcastError {
+    dead.add(edge);
+    return new FormatcastError('NO_CODEC', message);
+  }
+
+  /** Run `fn`; if it hit a newly retired edge, route once more without it. */
+  async function rerouting<T>(fn: () => Promise<T>): Promise<T> {
+    const before = dead.size;
+    try {
+      return await fn();
+    } catch (error) {
+      if (error instanceof FormatcastError && error.code === 'NO_CODEC' && dead.size > before)
+        return fn().catch((again: unknown) => {
+          // no other way round: the missing codec is the better explanation
+          throw again instanceof FormatcastError && again.code === 'NO_ROUTE' ? error : again;
+        });
+      throw error;
+    }
+  }
+
   function buildEdges(fs: Map<string, FormatDef>, ts: TransformDef[]): Edge[] {
     const out: Edge[] = [];
     for (const f of fs.values()) {
@@ -163,25 +187,29 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       const cost = f.cost ?? 1;
       const params = f.params ?? {};
       // A lazy module is taken to provide both directions unless the format says otherwise.
-      if (f.decode || (f.load && f.decodes !== false))
-        out.push({
+      if (f.decode || (f.load && f.decodes !== false)) {
+        const edge: Edge = {
           from: f.id, to: kind, cost, format: f.id, op: 'decode', params,
           run: async (value, p, ctx) => {
             const { decode } = await codecOf(f);
-            if (!decode) throw new FormatcastError('NO_CODEC', `Format '${f.id}' cannot decode (its module exports no decode; declare decodes: false)`);
+            if (!decode) throw deadEnd(edge, `Format '${f.id}' cannot decode (its module exports no decode; declare decodes: false)`);
             const input = f.binary ? toBytes(value as string | Uint8Array) : toText(value as string | Uint8Array, (p.charset as string) ?? 'utf-8');
             return decode(input, p, ctx);
           },
-        });
-      if (f.encode || (f.load && f.encodes !== false))
-        out.push({
+        };
+        out.push(edge);
+      }
+      if (f.encode || (f.load && f.encodes !== false)) {
+        const edge: Edge = {
           from: kind, to: f.id, cost, format: f.id, op: 'encode', params,
           run: async (value, p, ctx) => {
             const { encode } = await codecOf(f);
-            if (!encode) throw new FormatcastError('NO_CODEC', `Format '${f.id}' cannot encode (its module exports no encode; declare encodes: false)`);
+            if (!encode) throw deadEnd(edge, `Format '${f.id}' cannot encode (its module exports no encode; declare encodes: false)`);
             return encode(value, p, ctx);
           },
-        });
+        };
+        out.push(edge);
+      }
     }
     for (const t of ts)
       out.push({
@@ -194,9 +222,13 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
   function register(...more: Pack[]): Registry {
     // Build the new state aside, so a bad pack leaves the registry as it was.
     const nextRaw = new Map(raw);
+    const nextOrder = new Map(order);
     const nextTransforms = [...transforms];
+    let seq = packSeq;
     for (const pack of more) {
+      seq++;
       for (const f of pack.formats ?? []) {
+        nextOrder.set(f.id, seq);
         const merged = merge(nextRaw.get(f.id), f);
         nextRaw.delete(f.id); // re-registering moves it to the end: the latest registration wins ties
         nextRaw.set(f.id, merged);
@@ -205,13 +237,14 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     }
     const nextEffective = new Map([...nextRaw.values()].map((f) => [f.id, resolveAlias(f, nextRaw)]));
     const nextEdges = buildEdges(nextEffective, nextTransforms);
-    [raw, transforms, effective, edges] = [nextRaw, nextTransforms, nextEffective, nextEdges];
+    dead.clear();
+    [raw, order, packSeq, transforms, effective, edges] = [nextRaw, nextOrder, seq, nextTransforms, nextEffective, nextEdges];
     nodes = new Set([...edges.flatMap((e) => [e.from, e.to]), ...effective.keys()]);
     return registry;
   }
 
-  /** Latest registration first, so a consumer's format wins over a built-in one everywhere. */
-  const byPrecedence = () => [...effective.values()].reverse();
+  /** Formats of the latest pack first (a consumer's format wins ties over a built-in one); within a pack, the pack's own order. */
+  const byPrecedence = () => [...effective.values()].sort((a, b) => order.get(b.id)! - order.get(a.id)!);
 
   /** A spec name to a target: a format id, then a kind, then an extension, then a MIME type. */
   function target(spec: FormatSpec): Target {
@@ -243,8 +276,12 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       const via = effective.get(goal)!.kind ?? defaultKind;
       return [...routeOrThrow(from, via), ...routeOrThrow(via, goal)];
     }
-    const r = cheapestRoute(edges, from, goal);
-    if (!r) throw new FormatcastError('NO_ROUTE', `No conversion route from '${from}' to '${goal}'`);
+    const r = cheapestRoute(dead.size ? edges.filter((e) => !dead.has(e)) : edges, from, goal);
+    if (!r) {
+      const missing = dead.size ? cheapestRoute(edges, from, goal)?.filter((e) => dead.has(e)) : undefined;
+      const why = missing?.length ? `: ${missing.map((e) => `'${e.format}' cannot ${e.op} (its module has no ${e.op})`).join(', ')}` : '';
+      throw new FormatcastError('NO_ROUTE', `No conversion route from '${from}' to '${goal}'${why}`);
+    }
     return r;
   }
 
@@ -252,7 +289,8 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     let v = value;
     for (const [i, step] of (route as Edge[]).entries()) {
       let params = step.params;
-      if (i === 0 && step.op === 'decode' && step.format === ends.source?.format) params = ends.source!.params;
+      if (i === 0 && ends.source && (step.op === 'decode' ? step.format === ends.source.format : !ends.source.format))
+        params = step.op === 'decode' ? ends.source.params : { ...step.params, ...ends.source.params };
       if (i === route.length - 1 && ends.target) {
         if (step.op === 'encode' && step.format === ends.target.format) params = ends.target.params;
         else if (step.op === 'transform' && !ends.target.format) params = { ...step.params, ...ends.target.params };
@@ -281,18 +319,20 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       );
     }
     // MIME parameters (charset, header=absent) apply to the candidate the MIME type names.
-    const mimeParams = source.mimeType ? parseSpec(source.mimeType).params : {};
+    const mimeParams = source.mimeType ? Object.fromEntries(Object.entries(parseSpec(source.mimeType).params).map(([k, v]) => [k.toLowerCase(), v])) : {};
     return ranked.map((c) => {
       const t = target(c.format);
       return { candidate: c, source: c.evidence.mime ? { ...t, params: { ...t.params, ...mimeParams } } : t };
     });
   }
 
-  /** Candidates may stand in for the best one only if they carry every piece of its hard evidence. */
+  /** Candidates may stand in for the best one only if they carry every piece of its hard evidence,
+   *  or if the content itself speaks for them more strongly (ndjson saved as `.json`). */
   function eligible(options: Option[]): Option[] {
     if (!options.length) return options;
-    const hard = _HARD_EVIDENCE.filter((k) => options[0].candidate.evidence[k]);
-    return options.filter((o) => hard.every((k) => o.candidate.evidence[k]));
+    const top = options[0].candidate.evidence;
+    const hard = _HARD_EVIDENCE.filter((k) => top[k]);
+    return options.filter((o, i) => i === 0 || hard.every((k) => o.candidate.evidence[k]) || (o.candidate.evidence.sniff ?? 0) > (top.sniff ?? 0));
   }
 
   async function plans(input: unknown, options: DecodeOptions): Promise<{ plans: Plan[]; attempts: Attempt[] }> {
@@ -306,7 +346,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       const t = target(options.format);
       const route = routeOrThrow(t.kind, goal ?? t.kind);
       const candidate: Candidate = { format: t.kind, score: Infinity, evidence: { explicit: 1 } };
-      return { plans: [{ format: t.kind, candidate, route, run: () => runRoute(route, input, { target: goal }, ctxOf(options)) }], attempts };
+      return { plans: [{ format: t.kind, candidate, route: _plain(route), run: () => runRoute(route, input, { source: t, target: goal }, ctxOf(options)) }], attempts };
     }
     const source = await readSource(input, options);
     const value = source.bytes ?? source.text;
@@ -314,13 +354,15 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     for (const { candidate, source: t } of eligible(sourceTargets(source, options))) {
       try {
         const route = routeOrThrow(t.kind, goal ?? finalKind(t.kind));
-        out.push({ format: candidate.format, candidate, route, run: () => runRoute(route, value, { source: t, target: goal }, ctxOf(source)) });
+        out.push({ format: candidate.format, candidate, route: _plain(route), run: () => runRoute(route, value, { source: t, target: goal }, ctxOf(source)) });
       } catch (error) {
         attempts.push({ format: candidate.format, error });
       }
     }
     return { plans: out, attempts };
   }
+
+  const _plain = (route: Step[]): Step[] => route.map(({ from, to, cost, format, op }) => ({ from, to, cost, format, op }));
 
   function failure(attempts: Attempt[]): FormatcastError {
     if (attempts.length === 1 && attempts[0].error instanceof FormatcastError) return attempts[0].error;
@@ -331,13 +373,17 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     });
   }
 
-  async function decodeWithInfo<T>(input: unknown, options: DecodeOptions = {}): Promise<Decoded<T>> {
+  function decodeWithInfo<T>(input: unknown, options: DecodeOptions = {}): Promise<Decoded<T>> {
+    return rerouting(() => decodeOnce<T>(input, options));
+  }
+
+  async function decodeOnce<T>(input: unknown, options: DecodeOptions): Promise<Decoded<T>> {
     const { plans: ps, attempts } = await plans(input, options);
     for (const plan of ps) {
       try {
         return { value: (await plan.run()) as T, format: plan.format, route: plan.route, candidate: plan.candidate };
       } catch (error) {
-        if (error instanceof FormatcastError && error.code === 'MISSING_DEPENDENCY') throw error;
+        if (error instanceof FormatcastError && (error.code === 'MISSING_DEPENDENCY' || error.code === 'NO_CODEC')) throw error;
         attempts.push({ format: plan.format, error });
       }
     }
@@ -351,7 +397,8 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       return rank(await readSource(input, hints), byPrecedence(), { weights, headSize });
     },
     route(from, to) {
-      return cheapestRoute(edges, target(from).kind, target(to).kind)?.map(({ from, to, cost, format, op }) => ({ from, to, cost, format, op }));
+      const r = cheapestRoute(edges.filter((e) => !dead.has(e)), target(from).kind, target(to).kind);
+      return r && _plain(r);
     },
     async resolve(input, options = {}) {
       const { plans: ps, attempts } = await plans(input, options);
@@ -365,8 +412,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     async encode<T>(value: unknown, options: EncodeOptions): Promise<T> {
       const goal = target(options.format);
       const from = options.from ?? (goal.format ? (effective.get(goal.format)!.kind ?? defaultKind) : defaultKind);
-      const route = routeOrThrow(from, goal);
-      return (await runRoute(route, value, { target: goal }, { context: options.context })) as T;
+      return rerouting(async () => (await runRoute(routeOrThrow(from, goal), value, { target: goal }, { context: options.context })) as T);
     },
     async convert<T>(input: Input, options: ConvertOptions): Promise<T> {
       const { to, from, ...rest } = options;

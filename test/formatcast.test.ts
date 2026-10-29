@@ -10,6 +10,7 @@ describe('parseSpec', () => {
     expect(parseSpec('text/csv; header=absent; n=3')).toEqual({ name: 'text/csv', params: { header: 'absent', n: '3' } });
     expect(parseSpec('x;q="a\\"b"')).toEqual({ name: 'x', params: { q: 'a"b' } });
     expect(parseSpec('csv;strict;delimiter="\\t";q="a;b=c"')).toEqual({ name: 'csv', params: { strict: true, delimiter: '\t', q: 'a;b=c' } });
+    expect(parseSpec('csv;a=x"y;header=false')).toEqual({ name: 'csv', params: { a: 'x"y', header: false } });
     expect(parseSpec({ id: 'csv', delimiter: '\t' })).toEqual({ name: 'csv', params: { delimiter: '\t' } });
   });
 });
@@ -64,12 +65,17 @@ describe('the default registry (text pack)', () => {
     expect([info.format, info.value]).toEqual(['csv', [{ name: 'ann', note: 'time: 10' }, { name: 'bob', note: 'x' }]]);
     // a broken .toml must not come back as CSV rows
     await expect(decode('a = [1, 2]\nb = [3, 4]\na = [5, 6]\n', { filename: 'cfg.toml' })).rejects.toMatchObject({ code: 'DECODE_FAILED' });
-    await expect(decode('a: 1\n', { filename: 'oops.json' })).rejects.toThrow(/json/);
+    // ...unless the content speaks more strongly for another format
+    expect(await decodeWithInfo('{"a":1}\n{"a":2}\n', { filename: 'export.json' })).toMatchObject({ format: 'ndjson', value: [{ a: 1 }, { a: 2 }] });
+    expect(await decodeWithInfo('a: 1\n', { filename: 'oops.json' })).toMatchObject({ format: 'yaml', value: { a: 1 } });
+    // built-in order breaks ties: YAML with commas stays YAML
+    expect(await decodeWithInfo('name: Smith, John\ncity: Paris, France\n')).toMatchObject({ format: 'yaml', value: { name: 'Smith, John', city: 'Paris, France' } });
   });
 
   it('reads params from a MIME type hint', async () => {
     const latin1 = new Uint8Array([0x61, 0x0a, 0xe9, 0x0a]); // "a\né\n" in ISO-8859-1
     expect(await decode(latin1, { mimeType: 'text/csv; charset=iso-8859-1' })).toEqual([{ a: 'é' }]);
+    expect(await decode(latin1, { mimeType: 'Text/CSV; Charset=ISO-8859-1' })).toEqual([{ a: 'é' }]);
   });
 
   it('round-trips a format to itself with new params', async () => {
@@ -83,6 +89,7 @@ describe('the default registry (text pack)', () => {
     await expect(decode('a\n"x\n', { format: 'csv' })).rejects.toThrow(/unterminated/);
     await expect(decode('a\n1,2\n', { format: 'csv' })).rejects.toThrow(/2 fields/);
     expect(await decode('a\n1,2\n', { format: 'csv;strict=false' })).toEqual([{ a: '1' }]);
+    expect(await decode('a,b\n1,2,\n', { format: 'csv' })).toEqual([{ a: '1', b: '2' }]); // a trailing delimiter is not data
     expect(await encode([{ a: { b: 1 } }], { format: 'csv' })).toBe('a\n"{""b"":1}"\n');
   });
 
@@ -136,6 +143,35 @@ describe('packs, routes and lazy codecs', () => {
     expect(await plan.run()).toEqual({ notes: ['C'] });
   });
 
+  it('hands out routes as data that cannot touch the registry', async () => {
+    const reg = createRegistry();
+    const info = await reg.decodeWithInfo('[{"a":1,"b":2}]', { format: 'json', to: 'csv' });
+    expect(Object.keys(info.route[1]).sort()).toEqual(['cost', 'format', 'from', 'op', 'to']);
+    expect(await reg.decode('[{"a":1,"b":2}]', { format: 'json', to: 'csv' })).toBe('a,b\n1,2\n');
+  });
+
+  it('routes around a lazy direction the module turns out not to have', async () => {
+    const reg = createRegistry({
+      builtins: false,
+      packs: [{
+        formats: [
+          { id: 'cheap', extensions: ['c'], kind: 'song', load: async () => ({ decode: (t: string) => ({ t }) }) },
+          { id: 'json', kind: 'song', cost: 5, decode: (t: string) => JSON.parse(t), encode: (v: unknown) => JSON.stringify(v) },
+        ],
+        transforms: [
+          { from: 'cheap', to: 'out', cost: 0.5, convert: (v: string) => `via cheap: ${v}` },
+          { from: 'json', to: 'out', cost: 0.1, convert: (v: string) => `via json: ${v}` },
+        ],
+      }],
+    });
+    // song → cheap (lazy, claimed) → out costs 1.5, song → json → out 5.1; cheap's module has no encode,
+    // so the first attempt retires that edge and the second takes the json route
+    expect(await reg.decode({ a: 1 }, { format: 'song', to: 'out' })).toBe('via json: {"a":1}');
+    expect(reg.route('song', 'out')!.map((s) => s.to)).toEqual(['json', 'out']);
+    await expect(reg.encode({ a: 1 }, { format: 'cheap', from: 'song' })).rejects.toThrow(/cannot encode/);
+    expect(reg.route('song', 'cheap')).toBeUndefined();
+  });
+
   it('skips candidates with no route to the target', async () => {
     const reg = createRegistry({ packs: [music] });
     await expect(reg.decode('a,b\n1,2\n', { to: 'tune' })).rejects.toMatchObject({ code: 'NO_ROUTE' });
@@ -181,5 +217,9 @@ describe('packs, routes and lazy codecs', () => {
     const own = createRegistry({ builtins: false, packs: [{ formats: [{ id: 'y', requires: ['yaml'], load: () => import('./no-such-file.js' as string) }] }] });
     const err2 = (await own.decode('...', { format: 'y' }).catch((e: unknown) => e)) as Error;
     expect((err2 as FormatcastError).code).toBe('DECODE_FAILED');
+    const { isMissingModuleError } = await import('../src/errors.js');
+    expect(isMissingModuleError(new Error("Cannot find module '/app/mods/midi/helpers.mjs'"), 'midi')).toBe(false);
+    expect(isMissingModuleError(new Error("Cannot find package 'midi' imported from /app/x.js"), 'midi')).toBe(true);
+    expect(isMissingModuleError(new Error('Failed to resolve module specifier "midi/sub"'), 'midi')).toBe(true);
   });
 });

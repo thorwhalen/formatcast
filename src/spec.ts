@@ -34,7 +34,7 @@ function _segments(spec: string): string[] {
       cur += c + spec[++i];
       continue;
     }
-    if (c === '"') quoted = !quoted;
+    if (c === '"' && (quoted || /=\s*$/.test(cur))) quoted = !quoted; // a quote opens only at the start of a value
     if (c === ';' && !quoted) {
       out.push(cur);
       cur = '';

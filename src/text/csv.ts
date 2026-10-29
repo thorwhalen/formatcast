@@ -4,7 +4,7 @@
  * Params: `delimiter` (default `,`, any non-empty string), `quote` (`"`, one character),
  * `header` (true: rows are objects keyed by the first row; false: rows are arrays; RFC 4180's
  * `present`/`absent` are accepted too), `strict` (true: an unterminated quote, or a row with more
- * fields than the header, is an error rather than silently lost data), `newline` (written between
+ * non-empty fields than the header, is an error rather than silently lost data), `newline` (written between
  * rows, `\n`), `columns` (encode: the column order; default every key in order of first
  * appearance). Values are decoded as strings; objects are encoded as JSON.
  */
@@ -75,7 +75,7 @@ export function decode(text: string, p: Params): string[][] | Record<string, str
   if (!o.header) return rows;
   const [names = [], ...body] = rows;
   return body.map((r, k) => {
-    if (o.strict && r.length > names.length)
+    if (o.strict && r.slice(names.length).some((v) => v !== ''))
       throw new FormatcastError('BAD_INPUT', `csv: row ${k + 2} has ${r.length} fields but the header has ${names.length} (pass strict=false to drop the extra ones)`);
     return Object.fromEntries(names.map((n, j) => [n, r[j] ?? '']));
   });

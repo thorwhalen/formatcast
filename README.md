@@ -60,7 +60,7 @@ Without an explicit format, every registered format is scored by the evidence th
 | extension | 0.5 | `filename`, or a `File`'s name |
 | MIME type | 0.3 | `mimeType`, or a `Blob`'s type |
 
-Content beats the name, and the name beats the declared type (a browser's `File.type` is itself guessed from the extension). When the best candidate fails to decode, the next one is tried, but only if it carries all of the best one's hard evidence (magic, extension, MIME type): a broken `config.toml` fails with the TOML parser's error instead of coming back as CSV rows. If every eligible candidate fails, the error lists each attempt. Ties go to the format registered last, so a consumer's format wins over a built-in one. `detect(input, hints)` returns the ranked candidates without decoding; `createRegistry({ weights, headSize })` changes the scoring.
+Content beats the name, and the name beats the declared type (a browser's `File.type` is itself guessed from the extension). When the best candidate fails to decode, the next one is tried, but only if it carries all of the best one's hard evidence (magic, extension, MIME type) or its content sniffs more strongly: a broken `config.toml` fails with the TOML parser's error instead of coming back as CSV rows, while newline-delimited JSON saved as `export.json` still decodes as ndjson. If every eligible candidate fails, the error lists each attempt. Ties go to the most recently registered pack (a consumer's format wins over a built-in one), and within a pack to its own order. `detect(input, hints)` returns the ranked candidates without decoding; `createRegistry({ weights, headSize })` changes the scoring.
 
 ## Your own formats: packs
 
@@ -108,7 +108,7 @@ A format definition:
 | `params` | default parameters, overridden by the request's |
 | `decode`, `encode` | inline codec functions `(value, params, ctx)` |
 | `load` | lazy codec: `() => import(...)` of a module exporting `decode` and/or `encode`; called once, on first use |
-| `decodes`, `encodes` | with `load`: set `false` for a direction the module does not provide, so no route counts on it (default: both) |
+| `decodes`, `encodes` | with `load`: set `false` for a direction the module does not provide, so no route counts on it (default: both; if a loaded module lacks one anyway, that edge is retired and the request is routed once more without it) |
 | `requires` | npm packages `load` needs; when one of them is not installed, the error says what to `npm install` |
 | `extends` | another format's id: inherit its codec, kind and params (`tsv` is `csv` with a tab) |
 | `cost` | route cost of this format's edges (default 1) |

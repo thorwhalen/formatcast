@@ -30,7 +30,9 @@ export function isMissingModuleError(error: unknown, pkg: string): boolean {
   const e = error as { code?: string; message?: string } | undefined;
   const message = String(e?.message ?? '');
   const missing = e?.code === 'ERR_MODULE_NOT_FOUND' || /Cannot find (package|module)|Failed to resolve|Failed to fetch dynamically imported module/i.test(message);
-  return missing && new RegExp(`['"\\s/]${pkg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(['"/\\s]|$)`).test(message);
+  // the package as a bare specifier in quotes ('midi', "midi/sub"), never a path that merely contains it
+  const escaped = pkg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return missing && new RegExp(`['"]${escaped}(/[^'"]*)?['"]`).test(message);
 }
 
 export function errorMessage(error: unknown): string {
