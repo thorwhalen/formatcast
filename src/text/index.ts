@@ -38,6 +38,9 @@ function _isJsonContainer(line: string): boolean {
   }
 }
 
+/** A whole line that is a TOML key/value pair whose value is a TOML value (so `bpm=100 C4 D4` is not one). */
+const _TOML_PAIR = /^\s*[\w"'.-]+\s*=\s*("[^"]*"|'[^']*'|[+-]?(\d[\d_]*(\.\d+)?([eE][+-]?\d+)?|inf|nan)|true|false|\d{4}-\d{2}-\d{2}[\dT:.Z+ -]*|[[{].*)\s*(#.*)?$/m;
+
 /** An `indent` param from a spec string arrives as text: digits mean spaces, anything else is the indent string. */
 const _indent = (v: unknown) => (typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : (v as number | string | undefined));
 
@@ -85,7 +88,7 @@ export const textPack: Pack = {
       sniff: (_, text) => {
         const t = text ?? '';
         if (/^\s*\[{1,2}[\w"'. -]+\]{1,2}\s*$/m.test(t)) return 0.7;
-        return /^\s*[\w"'.-]+\s*=\s*\S/m.test(t) ? 0.5 : 0;
+        return _TOML_PAIR.test(t) ? 0.5 : 0;
       },
       requires: ['smol-toml'],
       load: () => import('./toml.js'),
