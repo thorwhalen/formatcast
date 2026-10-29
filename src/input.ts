@@ -10,10 +10,15 @@ export interface Source {
   mimeType?: string;
 }
 
+/** Also true for an ArrayBuffer from another realm (an iframe, a vm context). */
+function _isArrayBuffer(x: unknown): x is ArrayBuffer {
+  return x instanceof ArrayBuffer || Object.prototype.toString.call(x) === '[object ArrayBuffer]';
+}
+
 export function isInput(x: unknown): x is Input {
   return (
     typeof x === 'string' ||
-    x instanceof ArrayBuffer ||
+    _isArrayBuffer(x) ||
     ArrayBuffer.isView(x) ||
     (typeof Blob !== 'undefined' && x instanceof Blob)
   );
@@ -23,7 +28,7 @@ export function isInput(x: unknown): x is Input {
 export async function readSource(input: Input, hints: Hints = {}): Promise<Source> {
   if (typeof input === 'string') return { text: input, ...hints };
   if (input instanceof Uint8Array) return { bytes: input, ...hints };
-  if (input instanceof ArrayBuffer) return { bytes: new Uint8Array(input), ...hints };
+  if (_isArrayBuffer(input)) return { bytes: new Uint8Array(input), ...hints };
   if (ArrayBuffer.isView(input)) return { bytes: new Uint8Array(input.buffer, input.byteOffset, input.byteLength), ...hints };
   if (typeof Blob !== 'undefined' && input instanceof Blob) {
     const name = (input as { name?: unknown }).name;

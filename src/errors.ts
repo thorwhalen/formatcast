@@ -25,12 +25,12 @@ export class FormatcastError extends Error {
   }
 }
 
-const _MISSING_MODULE = /Cannot find (package|module)|Failed to resolve|Failed to fetch dynamically imported module|ERR_MODULE_NOT_FOUND/i;
-
-/** Whether an import failure looks like "that package is not installed". */
-export function isMissingModuleError(error: unknown): boolean {
+/** Whether an import failure says that package `pkg` (or a subpath of it) is not installed. */
+export function isMissingModuleError(error: unknown, pkg: string): boolean {
   const e = error as { code?: string; message?: string } | undefined;
-  return e?.code === 'ERR_MODULE_NOT_FOUND' || _MISSING_MODULE.test(String(e?.message ?? ''));
+  const message = String(e?.message ?? '');
+  const missing = e?.code === 'ERR_MODULE_NOT_FOUND' || /Cannot find (package|module)|Failed to resolve|Failed to fetch dynamically imported module/i.test(message);
+  return missing && new RegExp(`['"\\s/]${pkg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(['"/\\s]|$)`).test(message);
 }
 
 export function errorMessage(error: unknown): string {

@@ -7,9 +7,10 @@ npm install formatcast
 ```
 
 ```js
-import { decode, encode, convert } from 'formatcast';
+import { decode, decodeWithInfo, encode, convert } from 'formatcast';
 
 const data = await decode(file);                        // a File, Blob, string, Uint8Array or ArrayBuffer
+const { value, format } = await decodeWithInfo(file);   // ...and which format it turned out to be
 const yaml = await encode(data, { format: 'yaml' });
 const toml = await convert(file, { to: 'toml' });
 ```
@@ -40,12 +41,13 @@ Wherever a format is named, it can be an id, an extension, a MIME type, any of t
 ```js
 await decode(text, { format: 'csv' });
 await decode(text, { format: 'csv;delimiter=";";header=false' });
+await decode(text, { format: 'csv;delimiter="\\t"' });          // \t, \n, \r inside quotes
 await decode(text, { format: 'text/csv; header=absent' });
 await decode(text, { format: { id: 'csv', delimiter: '|' } });
 await encode(data, { format: 'json;indent=0' });
 ```
 
-An explicit format always wins over detection. Unquoted `true`, `false` and numbers become booleans and numbers.
+An explicit format always wins over detection. A bare key (`csv;strict`) means `true`, unquoted `true` and `false` are booleans, and every other value is passed to the codec as a string. Parameters on a MIME type hint (`text/csv; charset=iso-8859-1`) apply to the format that MIME type names.
 
 ## Detection
 
@@ -58,7 +60,7 @@ Without an explicit format, every registered format is scored by the evidence th
 | extension | 0.5 | `filename`, or a `File`'s name |
 | MIME type | 0.3 | `mimeType`, or a `Blob`'s type |
 
-Content beats the name, and the name beats the declared type (a browser's `File.type` is itself guessed from the extension). When the best candidate fails to decode, the next one is tried; if all fail, the error lists every attempt. `detect(input, hints)` returns the ranked candidates without decoding; `createRegistry({ weights, headSize })` changes the scoring.
+Content beats the name, and the name beats the declared type (a browser's `File.type` is itself guessed from the extension). When the best candidate fails to decode, the next one is tried, but only if it carries all of the best one's hard evidence (magic, extension, MIME type): a broken `config.toml` fails with the TOML parser's error instead of coming back as CSV rows. If every eligible candidate fails, the error lists each attempt. Ties go to the format registered last, so a consumer's format wins over a built-in one. `detect(input, hints)` returns the ranked candidates without decoding; `createRegistry({ weights, headSize })` changes the scoring.
 
 ## Your own formats: packs
 
@@ -73,9 +75,12 @@ const musicPack = definePack({
       magic: 'MThd', kind: 'song',
       requires: ['@tonejs/midi'],
       load: () => import('./codecs/midi.js'),   // exports decode(bytes, params, ctx)
+      encodes: false,                            // ...and no encode: no route will count on one
     },
     {
-      id: 'mxl', binary: true, extensions: ['mxl'], magic: 'PK', kind: 'musicxml',  // unzips to another format
+      id: 'mxl', binary: true, extensions: ['mxl'], kind: 'musicxml',  // unzips to another format
+      // a zip's first entry here is the `mimetype` file, so its content is inside the head
+      sniff: (head) => new TextDecoder().decode(head.subarray(0, 100)).includes('application/vnd.recordare.musicxml'),
       load: () => import('./codecs/mxl.js'),
     },
     {
@@ -94,7 +99,7 @@ A format definition:
 
 | field | meaning |
 | --- | --- |
-| `id` | unique name; registering an id again replaces it (so you can swap the YAML library) |
+| `id` | unique name; registering an id again merges into the existing definition (pass only a codec to swap the YAML library and keep its detection; `replace: true` starts over) |
 | `kind` | what `decode` produces and `encode` consumes; default `'data'`; may be another format's id |
 | `binary` | the codec gets and returns `Uint8Array` (default: text, a `string`, decoded as UTF-8 or the `charset` param) |
 | `extensions`, `mimeTypes` | lower case, no dot, no parameters |
@@ -103,8 +108,8 @@ A format definition:
 | `params` | default parameters, overridden by the request's |
 | `decode`, `encode` | inline codec functions `(value, params, ctx)` |
 | `load` | lazy codec: `() => import(...)` of a module exporting `decode` and/or `encode`; called once, on first use |
-| `decodes`, `encodes` | with `load`: which directions the module provides (default: decodes only) |
-| `requires` | npm packages `load` needs; named in the error if they are missing |
+| `decodes`, `encodes` | with `load`: set `false` for a direction the module does not provide, so no route counts on it (default: both) |
+| `requires` | npm packages `load` needs; when one of them is not installed, the error says what to `npm install` |
 | `extends` | another format's id: inherit its codec, kind and params (`tsv` is `csv` with a tab) |
 | `cost` | route cost of this format's edges (default 1) |
 
@@ -122,6 +127,8 @@ const plan = await formats.resolve(file, { to: 'song' });   // detect and route,
 plan.format; plan.route; await plan.run();
 ```
 
+Format parameters apply to the step that runs that format's codec: the source format's to the first decode, the target's to the final encode; intermediate formats use their defaults.
+
 `decode` without `to` decodes to the format's kind, following through container formats (an `mxl` file ends as a song, not as MusicXML text). `decode(value, { format: 'data', to: 'song' })` runs a route from an in-memory value.
 
 ## Loading
@@ -130,7 +137,11 @@ Nothing a codec needs is imported until a request routes through it. To pay the 
 
 ## Errors
 
-Everything throws a `FormatcastError` with a `code`: `NO_FORMAT` (nothing detected, or an unknown spec), `NO_ROUTE`, `NO_CODEC`, `MISSING_DEPENDENCY` (the message says what to `npm install`), `DECODE_FAILED` (with `attempts`: every candidate tried and why it failed), `BAD_INPUT`.
+Everything throws a `FormatcastError` with a `code`: `NO_FORMAT` (nothing detected, or an unknown spec), `NO_ROUTE`, `NO_CODEC`, `MISSING_DEPENDENCY` (the message says what to `npm install`), `DECODE_FAILED` (with `attempts`: every candidate tried and why it failed), `BAD_INPUT` (an unreadable input, or a value or params a codec refuses, such as a CSV delimiter that is empty).
+
+## CSV parameters
+
+`delimiter` (`,`, any non-empty string), `quote` (`"`), `header` (`true`: rows are objects keyed by the first row; `false` or RFC 4180's `absent`: rows are arrays), `strict` (`true`: an unterminated quote or a row with more fields than the header is an error, not silently lost data), `newline` (`\n`, for encoding), `columns` (encoding: the column order). Values decode as strings; objects encode as JSON.
 
 ## Design
 

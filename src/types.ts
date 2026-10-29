@@ -23,7 +23,7 @@ export interface Ctx {
   filename?: string;
   /** The MIME type the input came with, if any. */
   mimeType?: string;
-  /** Whatever the caller passed as `context` (castgraph's side channel: flags, handles, caches). */
+  /** Whatever the caller passed as `context`: a side channel for flags, handles, caches. */
   context?: unknown;
 }
 
@@ -62,10 +62,12 @@ export interface FormatDef {
   extends?: string;
   decode?: Decoder;
   encode?: Encoder;
-  /** With `load`: whether the loaded module decodes. Default true. (Inline `decode` speaks for itself.) */
+  /** With `load`: set false when the module has no `decode`, so no route counts on it. Default true. */
   decodes?: boolean;
-  /** With `load`: whether the loaded module encodes. Default false, so routes never count on an encoder that is not there. */
+  /** With `load`: set false when the module has no `encode`, so no route counts on it. Default true. */
   encodes?: boolean;
+  /** When this id is already registered: true replaces the old definition; by default the new fields are merged into it (a new codec replaces the old codec as a whole). */
+  replace?: boolean;
   /** Lazy codec: called (once, cached) only when the codec is first needed. */
   load?: () => Promise<CodecModule | { default: CodecModule }>;
   /** npm packages `load` needs, named in the error when they are missing. */
@@ -147,6 +149,14 @@ export interface ConvertOptions extends Hints {
   /** Source format, bypassing detection. */
   from?: FormatSpec;
   context?: unknown;
+}
+
+/** What `decodeWithInfo` returns: the value, and the format and route that produced it. */
+export interface Decoded<T = unknown> {
+  value: T;
+  format: string;
+  route: Step[];
+  candidate: Candidate;
 }
 
 /** A resolved decode: which format, which route; `run()` executes it. */

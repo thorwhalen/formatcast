@@ -7,8 +7,11 @@
  *     parseSpec('text/csv; header=absent')    // { name: 'text/csv', params: { header: 'absent' } }
  *     parseSpec({ id: 'csv', delimiter: '\t' })
  *
- * Parameter values may be quoted (RFC 9110 quoted-string, with backslash escapes); unquoted
- * `true`/`false` and decimal numbers become booleans and numbers, everything else stays a string.
+ * Parameters are separated by `;` (outside quotes). A value may be quoted (RFC 9110
+ * quoted-string) and inside quotes `\t`, `\n`, `\r` are a tab, a newline and a carriage return
+ * and a backslash escapes any other character. A bare key (`csv;strict`) is `true`; unquoted
+ * `true` and `false` are booleans. Every other value stays a string: each codec reads its own
+ * params, so `header=0` or `version=1.0` are not second-guessed here.
  */
 import type { FormatSpec, Params } from './types.js';
 
@@ -18,13 +21,42 @@ export interface ParsedSpec {
   params: Params;
 }
 
-const _NUMBER = /^-?\d+(\.\d+)?$/;
+const _ESCAPES: Record<string, string> = { t: '\t', n: '\n', r: '\r' };
 
-function _coerce(raw: string): unknown {
-  if (raw === 'true') return true;
-  if (raw === 'false') return false;
-  if (_NUMBER.test(raw)) return Number(raw);
-  return raw;
+/** Split on `;` outside double quotes, keeping the quotes for the value parser. */
+function _segments(spec: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let quoted = false;
+  for (let i = 0; i < spec.length; i++) {
+    const c = spec[i];
+    if (quoted && c === '\\' && i + 1 < spec.length) {
+      cur += c + spec[++i];
+      continue;
+    }
+    if (c === '"') quoted = !quoted;
+    if (c === ';' && !quoted) {
+      out.push(cur);
+      cur = '';
+    } else cur += c;
+  }
+  out.push(cur);
+  return out;
+}
+
+function _value(raw: string): unknown {
+  const v = raw.trim();
+  if (v.startsWith('"')) {
+    let out = '';
+    for (let i = 1; i < v.length && v[i] !== '"'; i++) {
+      if (v[i] === '\\' && i + 1 < v.length) {
+        const e = v[++i];
+        out += _ESCAPES[e] ?? e;
+      } else out += v[i];
+    }
+    return out;
+  }
+  return v === 'true' ? true : v === 'false' ? false : v;
 }
 
 export function parseSpec(spec: FormatSpec): ParsedSpec {
@@ -32,32 +64,12 @@ export function parseSpec(spec: FormatSpec): ParsedSpec {
     const { id, ...params } = spec;
     return { name: id.toLowerCase(), params };
   }
+  const [name, ...rest] = _segments(spec);
   const params: Params = {};
-  let i = spec.indexOf(';');
-  const name = (i < 0 ? spec : spec.slice(0, i)).trim().toLowerCase();
-  while (i >= 0 && i < spec.length) {
-    i++; // past ';'
-    const eq = spec.indexOf('=', i);
-    if (eq < 0) break;
-    const key = spec.slice(i, eq).trim();
-    let j = eq + 1;
-    while (spec[j] === ' ') j++;
-    let value: unknown;
-    if (spec[j] === '"') {
-      let out = '';
-      j++;
-      while (j < spec.length && spec[j] !== '"') {
-        if (spec[j] === '\\' && j + 1 < spec.length) j++;
-        out += spec[j++];
-      }
-      value = out;
-      i = spec.indexOf(';', j);
-    } else {
-      const end = spec.indexOf(';', j);
-      value = _coerce(spec.slice(j, end < 0 ? undefined : end).trim());
-      i = end;
-    }
-    if (key) params[key] = value;
+  for (const seg of rest) {
+    const eq = seg.indexOf('=');
+    const key = (eq < 0 ? seg : seg.slice(0, eq)).trim();
+    if (key) params[key] = eq < 0 ? true : _value(seg.slice(eq + 1));
   }
-  return { name, params };
+  return { name: name.trim().toLowerCase(), params };
 }
