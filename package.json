@@ -5,21 +5,48 @@
   "type": "module",
   "license": "Apache-2.0",
   "author": "Thor Whalen",
-  "repository": { "type": "git", "url": "git+https://github.com/thorwhalen/formatcast.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thorwhalen/formatcast.git"
+  },
   "homepage": "https://github.com/thorwhalen/formatcast#readme",
   "bugs": "https://github.com/thorwhalen/formatcast/issues",
-  "keywords": ["format", "codec", "detection", "sniffing", "magic-bytes", "mime", "import", "export", "conversion", "registry", "yaml", "toml", "csv"],
+  "keywords": [
+    "format",
+    "codec",
+    "detection",
+    "sniffing",
+    "magic-bytes",
+    "mime",
+    "import",
+    "export",
+    "conversion",
+    "registry",
+    "yaml",
+    "toml",
+    "csv"
+  ],
   "sideEffects": false,
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
     "./package.json": "./package.json"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "README.md", "LICENSE"],
-  "engines": { "node": ">=18" },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "size": "node scripts/size.mjs",
@@ -27,11 +54,15 @@
   },
   "wads": {
     "ci": {
-      "nodeVersions": ["22"],
+      "nodeVersions": [
+        "22"
+      ],
       "lintCommand": "npm run typecheck",
       "testCommand": "npm test",
       "buildCommand": "npm run build",
-      "publish": { "enabled": true }
+      "publish": {
+        "enabled": true
+      }
     }
   },
   "dependencies": {
