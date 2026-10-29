@@ -1,0 +1,19 @@
+# CI: calls the reusable npm workflow hosted in i2mint/wads. Configuration lives in
+# package.json under "wads" (wads.ci.*). Publishing is enabled there and fires only on a
+# push to main whose commit subject carries [publish-npm]; it authenticates with npm
+# trusted publishing (OIDC), so no secrets block. `id-token: write` must be granted here
+# because a called workflow cannot ask for more than its caller allows.
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  npm-ci:
+    uses: i2mint/wads/.github/workflows/npm-ci.yml@master
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      package-dir: "."
