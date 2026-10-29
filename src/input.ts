@@ -33,7 +33,7 @@ export async function readSource(input: Input, hints: Hints = {}): Promise<Sourc
   if (typeof Blob !== 'undefined' && input instanceof Blob) {
     const name = (input as { name?: unknown }).name;
     return {
-      bytes: new Uint8Array(await input.arrayBuffer()),
+      bytes: new Uint8Array(await _blobBytes(input)),
       filename: hints.filename ?? (typeof name === 'string' && name ? name : undefined),
       mimeType: hints.mimeType ?? (input.type || undefined),
     };
@@ -41,7 +41,19 @@ export async function readSource(input: Input, hints: Hints = {}): Promise<Sourc
   throw new FormatcastError('BAD_INPUT', `Cannot read input of type ${Object.prototype.toString.call(input)}; pass a string, Uint8Array, ArrayBuffer or Blob`);
 }
 
-const _BOM = '﻿';
+/** A Blob's bytes; through FileReader where `Blob.arrayBuffer` is missing (jsdom, older browsers). */
+function _blobBytes(blob: Blob): Promise<ArrayBuffer> {
+  if (typeof blob.arrayBuffer === 'function') return blob.arrayBuffer();
+  if (typeof FileReader === 'undefined') throw new FormatcastError('BAD_INPUT', 'This Blob has no arrayBuffer() and there is no FileReader to read it');
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as ArrayBuffer);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(blob);
+  });
+}
+
+const _BOM = '\uFEFF';
 
 /** Bytes to text (BOM dropped), honouring a `charset` param. */
 export function toText(value: string | Uint8Array, charset = 'utf-8'): string {

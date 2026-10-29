@@ -25,6 +25,8 @@ describe('the default registry (text pack)', () => {
     expect((await detect('{"a":1}\n{"a":2}\n{"a":3}\n'))[0].format).toBe('ndjson');
     expect((await detect('{"a":1}\n{"a":2}\n'))[0].format).toBe('ndjson');
     expect((await detect('anything', { filename: 'x.yml' }))[0].format).toBe('yaml');
+    expect((await detect('title = "x"\nbpm = 120 # tempo\n'))[0].format).toBe('toml');
+    expect((await detect('bpm=100 C4 D4\n')).map((c) => c.format)).not.toContain('toml');
     expect((await detect('anything', { mimeType: 'application/toml; charset=utf-8' }))[0].format).toBe('toml');
   });
 
@@ -42,6 +44,26 @@ describe('the default registry (text pack)', () => {
     expect(await decode(bytes('{"a":1}').buffer)).toEqual({ a: 1 });
     const file = new File(['k: v\n'], 'spec.yaml', { type: '' });
     expect(await decode(file)).toEqual({ k: 'v' });
+  });
+
+  it('reads a Blob without arrayBuffer() through FileReader (jsdom)', async () => {
+    const blob = new Blob(['{"a":1}']);
+    Object.defineProperty(blob, 'arrayBuffer', { value: undefined });
+    class FakeFileReader {
+      result: ArrayBuffer | null = null;
+      error: unknown = null;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      readAsArrayBuffer(b: Blob) {
+        new Response(b).arrayBuffer().then((r) => ((this.result = r), this.onload?.()));
+      }
+    }
+    vi.stubGlobal('FileReader', FakeFileReader);
+    try {
+      expect(await decode(blob)).toEqual({ a: 1 });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('takes params from the format spec', async () => {
