@@ -1,6 +1,6 @@
 {
   "name": "formatcast",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Resolve and run format conversions: detect a format (explicit spec, extension, MIME type, magic bytes), route through codecs, load each codec only when needed.",
   "type": "module",
   "license": "Apache-2.0",
