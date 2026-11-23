@@ -75,6 +75,17 @@ describe('the default registry (text pack)', () => {
   it('encodes, and converts between formats through data', async () => {
     expect(await encode({ a: 1 }, { format: 'json;indent=0' })).toBe('{"a":1}');
     expect(await encode({ a: 1 }, { format: 'yaml' })).toBe('a: 1\n');
+  });
+
+  it('quotes strings that a YAML 1.1 reader takes as booleans or null', async () => {
+    const { parse } = await import('yaml');
+    const risky = ['y', 'n', 'yes', 'no', 'on', 'off', 'true', 'false', '~', 'null', 'Y', 'No', 'ON', 'Off'];
+    const value = { vowels: risky, id: 'no' };
+    const text = (await encode(value, { format: 'yaml' })) as string;
+    expect(text).toContain('id: "no"');
+    expect(parse(text, { version: '1.1' })).toEqual(value);
+    expect(parse(text)).toEqual(value);
+    expect(await encode({ id: 'no' }, { format: 'yaml;version=1.2' })).toBe('id: no\n');
     expect(await encode({ t: { n: 1 } }, { format: 'toml' })).toBe('[t]\nn = 1\n');
     expect(await encode([{ a: 1, b: 'x,y' }, { a: 2 }], { format: 'csv' })).toBe('a,b\n1,"x,y"\n2,\n');
     expect(await encode([[1, 2]], { format: 'tsv' })).toBe('1\t2\n');
